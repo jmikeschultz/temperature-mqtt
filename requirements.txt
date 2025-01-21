@@ -1,0 +1,3 @@
+adafruit-circuitpython-sht4x
+paho-mqtt
+pyserial

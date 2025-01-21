@@ -1,0 +1,15 @@
+[Unit]
+Description=Temperature MQTT Service
+After=network.target
+
+[Service]
+EnvironmentFile=/home/mike/temperature-mqtt/env
+ExecStart=/home/mike/temperature-mqtt/venv/bin/python /home/mike/temperature-mqtt/temperature_mqtt.py
+WorkingDirectory=/home/mike
+StandardOutput=inherit
+StandardError=inherit
+Restart=always
+User=mike
+
+[Install]
+WantedBy=multi-user.target
