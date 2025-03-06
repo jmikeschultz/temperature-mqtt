@@ -9,7 +9,6 @@ WorkingDirectory=/home/mike
 StandardOutput=inherit
 StandardError=inherit
 Restart=always
-User=mike
 
 [Install]
 WantedBy=multi-user.target

@@ -6,6 +6,29 @@ import sys
 import json
 import time
 import serial.tools.list_ports
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Logging Configuration
+LOG_FILE = "/var/log/temperature_mqtt.log"
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+
+# Configure logger
+logger = logging.getLogger("TemperatureMQTT")
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter(LOG_FORMAT)
+
+# File handler with rotation
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5000000, backupCount=3)
+file_handler.setFormatter(formatter)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+
+# Add handlers to logger
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 # MQTT Configuration
 MQTT_BROKER = "hx0.duckdns.org"
@@ -23,23 +46,29 @@ def find_device():
     ports = serial.tools.list_ports.comports()
     for port in ports:
         if device in port.description:
-            print(f'found {device} at {port.device}')
+            logger.info(f'Found {device} at {port.device}')
             return port.device
+    logger.error(f"{device} not found!")
     raise RuntimeError(f"{device} not found!")
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     global is_connected
     if reason_code != 0:
-        print(f"Failed to connect: {reason_code}")
+        logger.error(f"Failed to connect to MQTT broker: {reason_code}")
         client.loop_stop()
         sys.exit(f"Exiting: Failed to connect to MQTT broker. Reason: {reason_code}")
     else:
         is_connected = True
-        print(f'Connection to MQTT broker {MQTT_BROKER} succeeded')
+        logger.info(f'Connected to MQTT broker {MQTT_BROKER}')
     event.set()
 
 # Serial Port Configuration
-serial_port = find_device()
+try:
+    serial_port = find_device()
+except RuntimeError as e:
+    logger.critical(str(e))
+    sys.exit(1)
+
 baud_rate = 9600
 SLEEP_SECS = 60
 
@@ -50,12 +79,14 @@ mqtt_client.on_connect = on_connect
 if MQTT_USERNAME and MQTT_PASSWORD:
     mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 else:
-    sys.exit('Missing OS envs: MQTT_USERNAME, MQTT_PASSWORD')
+    logger.critical('Missing OS envs: MQTT_USERNAME, MQTT_PASSWORD')
+    sys.exit(1)
 
 try:
     mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 except Exception as e:
-    sys.exit(f"Error connecting to MQTT broker: {e}")
+    logger.critical(f"Error connecting to MQTT broker: {e}")
+    sys.exit(1)
 
 # Start the MQTT loop in a separate thread
 mqtt_client.loop_start()
@@ -77,11 +108,11 @@ def process_and_publish(line):
             # Publish the JSON payload
             result = mqtt_client.publish(MQTT_TOPIC, json.dumps(payload), qos=1)
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                print(f"Failed to publish message: {result.rc}")
+                logger.warning(f"Failed to publish message: {result.rc}")
             else:
-                print(f"Published: {json.dumps(payload)}")
+                logger.info(f"Published: {json.dumps(payload)}")
     except ValueError:
-        print(f"Error parsing line: {line}")
+        logger.error(f"Error parsing line: {line}")
 
 # Open the serial port and read data
 try:
@@ -94,9 +125,10 @@ try:
                 time.sleep(SLEEP_SECS)
 
 except serial.SerialException as e:
-    print(f"Serial error: {e}")
+    logger.error(f"Serial error: {e}")
 except KeyboardInterrupt:
-    print("Exiting script.")
+    logger.info("Exiting script.")
 finally:
     mqtt_client.loop_stop()
     mqtt_client.disconnect()
+    logger.info("MQTT client disconnected.")
