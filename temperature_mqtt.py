@@ -91,6 +91,10 @@ except Exception as e:
 # Start the MQTT loop in a separate thread
 mqtt_client.loop_start()
 
+# PERIODIC BUG
+# 2025-03-06 13:13:50,537 - INFO - Published: {"temperature": 92.12, "humidity": 19.4}
+# 2025-03-06 13:14:50,541 - INFO - Published: {"temperature": 59796414692.6, "humidity": 33.4}
+# 2025-03-06 13:15:50,545 - INFO - Published: {"temperature": 92.1, "humidity": 18.81}
 # Function to parse the line and send JSON to MQTT
 def process_and_publish(line):
     try:
@@ -98,6 +102,10 @@ def process_and_publish(line):
         if len(parts) >= 3:
             temperature = (float(parts[1]) * 9/5) + 32 # fahrenheit
             humidity = float(parts[2])
+
+            # ignore the above bug
+            if temperature > 212:
+                return
 
             # Create a JSON payload
             payload = {
