@@ -7,27 +7,17 @@ import json
 import time
 import serial.tools.list_ports
 import logging
-from logging.handlers import RotatingFileHandler
 
-# Logging Configuration
-LOG_FILE = "/var/log/temperature_mqtt.log"
+# Logging Configuration (ONLY Print to Console)
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 
 # Configure logger
 logger = logging.getLogger("TemperatureMQTT")
-logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter(LOG_FORMAT)
+logger.setLevel(logging.DEBUG)  # Change to INFO if too noisy
 
-# File handler with rotation
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5000000, backupCount=3)
-file_handler.setFormatter(formatter)
-
-# Console handler
+# Console handler (no file logging)
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-
-# Add handlers to logger
-logger.addHandler(file_handler)
+console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
 logger.addHandler(console_handler)
 
 # MQTT Configuration
@@ -62,6 +52,15 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         logger.info(f'Connected to MQTT broker {MQTT_BROKER}')
     event.set()
 
+def get_cpu_temperature():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as file:
+            temp_millidegrees = int(file.read().strip())
+            return round(temp_millidegrees / 1000, 1)
+    except Exception as e:
+        logger.error(f"Failed to read CPU temperature: {e}")
+        return None
+
 # Serial Port Configuration
 try:
     serial_port = find_device()
@@ -91,29 +90,25 @@ except Exception as e:
 # Start the MQTT loop in a separate thread
 mqtt_client.loop_start()
 
-# PERIODIC BUG
-# 2025-03-06 13:13:50,537 - INFO - Published: {"temperature": 92.12, "humidity": 19.4}
-# 2025-03-06 13:14:50,541 - INFO - Published: {"temperature": 59796414692.6, "humidity": 33.4}
-# 2025-03-06 13:15:50,545 - INFO - Published: {"temperature": 92.1, "humidity": 18.81}
-# Function to parse the line and send JSON to MQTT
 def process_and_publish(line):
     try:
         parts = line.split(", ")
         if len(parts) >= 3:
-            temperature = (float(parts[1]) * 9/5) + 32 # fahrenheit
+            temperature = (float(parts[1]) * 9/5) + 32 # Fahrenheit
             humidity = float(parts[2])
 
-            # ignore the above bug
+            # Ignore bugged readings
             if temperature > 212:
                 return
 
-            # Create a JSON payload
+            cpu_temp = get_cpu_temperature()
+
             payload = {
                 "temperature": round(temperature, 2),
-                "humidity": round(humidity, 2)
+                "humidity": round(humidity, 2),
+                "cpu_temp": round(cpu_temp, 2)
             }
 
-            # Publish the JSON payload
             result = mqtt_client.publish(MQTT_TOPIC, json.dumps(payload), qos=1)
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
                 logger.warning(f"Failed to publish message: {result.rc}")
