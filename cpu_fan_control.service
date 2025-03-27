@@ -1,0 +1,18 @@
+[Unit]
+Description=Custom Fan Controller with MQTT
+After=network.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/home/mike/temperature-mqtt/env
+ExecStart=/home/mike/temperature-mqtt/venv/bin/python /home/mike/temperature-mqtt/cpu_fan_control.py
+WorkingDirectory=/home/mike/temperature-mqtt
+Restart=always
+RestartSec=5
+User=mike
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

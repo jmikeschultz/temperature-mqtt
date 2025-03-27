@@ -1,3 +1,6 @@
+# =========================================== #
+# temperature_mqtt.py (updated: now only sensor)
+# =========================================== #
 import threading
 import serial
 import paho.mqtt.client as mqtt
@@ -8,130 +11,112 @@ import time
 import serial.tools.list_ports
 import logging
 
-# Logging Configuration (ONLY Print to Console)
+# ============================== #
+# Logging Setup
+# ============================== #
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
-
-# Configure logger
 logger = logging.getLogger("TemperatureMQTT")
-logger.setLevel(logging.DEBUG)  # Change to INFO if too noisy
-
-# Console handler (no file logging)
+logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
 logger.addHandler(console_handler)
 
-# MQTT Configuration
+# ============================== #
+# MQTT Setup
+# ============================== #
 MQTT_BROKER = "hx0.duckdns.org"
 MQTT_PORT = 1883
-MQTT_TOPIC = "home/boat/sensor_data"
+MQTT_TOPIC = "home/boat/usb_sht45"
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 
-# Global connection status
 is_connected = False
-event = threading.Event()
+connected_event = threading.Event()
+
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    global is_connected
+    if reason_code != 0:
+        logger.error(f"MQTT connection failed: {reason_code}")
+        client.loop_stop()
+        sys.exit(1)
+    is_connected = True
+    logger.info(f"Connected to MQTT broker at {MQTT_BROKER}")
+    connected_event.set()
 
 def find_device():
     device = 'SHT4x Trinkey M0'
     ports = serial.tools.list_ports.comports()
     for port in ports:
         if device in port.description:
-            logger.info(f'Found {device} at {port.device}')
+            logger.info(f"Found {device} at {port.device}")
             return port.device
-    logger.error(f"{device} not found!")
-    raise RuntimeError(f"{device} not found!")
+    raise RuntimeError(f"{device} not found")
 
-def on_connect(client, userdata, flags, reason_code, properties=None):
-    global is_connected
-    if reason_code != 0:
-        logger.error(f"Failed to connect to MQTT broker: {reason_code}")
-        client.loop_stop()
-        sys.exit(f"Exiting: Failed to connect to MQTT broker. Reason: {reason_code}")
+def setup_mqtt():
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_connect = on_connect
+    if MQTT_USERNAME and MQTT_PASSWORD:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
     else:
-        is_connected = True
-        logger.info(f'Connected to MQTT broker {MQTT_BROKER}')
-    event.set()
+        logger.warning("MQTT credentials not set")
 
-def get_cpu_temperature():
     try:
-        with open("/sys/class/thermal/thermal_zone0/temp", "r") as file:
-            temp_millidegrees = int(file.read().strip())
-            return round(temp_millidegrees / 1000, 1)
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
     except Exception as e:
-        logger.error(f"Failed to read CPU temperature: {e}")
-        return None
+        logger.critical(f"MQTT connection failed: {e}")
+        sys.exit(1)
 
-# Serial Port Configuration
-try:
-    serial_port = find_device()
-except RuntimeError as e:
-    logger.critical(str(e))
-    sys.exit(1)
+    return client
 
-baud_rate = 9600
-SLEEP_SECS = 60
-
-# MQTT Client Setup
-mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-mqtt_client.on_connect = on_connect
-
-if MQTT_USERNAME and MQTT_PASSWORD:
-    mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-else:
-    logger.critical('Missing OS envs: MQTT_USERNAME, MQTT_PASSWORD')
-    sys.exit(1)
-
-try:
-    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-except Exception as e:
-    logger.critical(f"Error connecting to MQTT broker: {e}")
-    sys.exit(1)
-
-# Start the MQTT loop in a separate thread
-mqtt_client.loop_start()
-
-def process_and_publish(line):
+def process_and_publish(line, mqtt_client):
     try:
         parts = line.split(", ")
         if len(parts) >= 3:
-            temperature = (float(parts[1]) * 9/5) + 32 # Fahrenheit
+            temp_f = (float(parts[1]) * 9/5) + 32
             humidity = float(parts[2])
 
-            # Ignore bugged readings
-            if temperature > 212:
+            if temp_f > 212:
                 return
 
-            cpu_temp = get_cpu_temperature()
-
             payload = {
-                "temperature": round(temperature, 2),
-                "humidity": round(humidity, 2),
-                "cpu_temp": round(cpu_temp, 2)
+                "temperature": round(temp_f, 2),
+                "humidity": round(humidity, 2)
             }
 
             result = mqtt_client.publish(MQTT_TOPIC, json.dumps(payload), qos=1)
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                logger.warning(f"Failed to publish message: {result.rc}")
+                logger.warning(f"Failed to publish: {result.rc}")
             else:
-                logger.info(f"Published: {json.dumps(payload)}")
+                logger.info(f"Published sensor data: {json.dumps(payload)}")
     except ValueError:
         logger.error(f"Error parsing line: {line}")
 
-# Open the serial port and read data
-try:
-    event.wait()
-    with serial.Serial(serial_port, baud_rate, timeout=1) as ser:
-        while is_connected:
-            line = ser.readline().decode('utf-8').strip()
-            if line:
-                process_and_publish(line)
-                time.sleep(SLEEP_SECS)
+def main():
+    try:
+        serial_port = find_device()
+    except RuntimeError as e:
+        logger.critical(str(e))
+        sys.exit(1)
 
-except serial.SerialException as e:
-    logger.error(f"Serial error: {e}")
-except KeyboardInterrupt:
-    logger.info("Exiting script.")
-finally:
-    mqtt_client.loop_stop()
-    mqtt_client.disconnect()
-    logger.info("MQTT client disconnected.")
+    mqtt_client = setup_mqtt()
+    connected_event.wait()
+
+    try:
+        with serial.Serial(serial_port, 9600, timeout=1) as ser:
+            while is_connected:
+                line = ser.readline().decode('utf-8').strip()
+                if line:
+                    process_and_publish(line, mqtt_client)
+                    time.sleep(60)
+    except serial.SerialException as e:
+        logger.error(f"Serial error: {e}")
+    except KeyboardInterrupt:
+        logger.info("Script interrupted")
+    finally:
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
+        logger.info("MQTT client disconnected")
+
+if __name__ == "__main__":
+    main()
