@@ -4,7 +4,9 @@ import sys
 import time
 import json
 import logging
+import threading
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import MQTT_ERR_SUCCESS
 import RPi.GPIO as GPIO
 
 # ============================== #
@@ -14,6 +16,7 @@ FAN_GPIO = 12  # BCM pin number (GPIO12)
 FAN_ON_TEMP = 50.0  # Temp (C) to turn fan ON
 FAN_OFF_TEMP = 45.0  # Temp (C) to turn fan OFF
 SLEEP_SECS = 5  # Time between temp checks
+MQTT_RETRY_SECS = 30  # Time between MQTT reconnection attempts
 
 # MQTT Configuration
 MQTT_BROKER = "hx0.duckdns.org"
@@ -42,22 +45,10 @@ def setup_gpio():
     logger.debug("GPIO initialized and fan set to OFF")
 
 # ============================== #
-# MQTT Setup
+# Fan State Reader
 # ============================== #
-def setup_mqtt():
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    if MQTT_USERNAME and MQTT_PASSWORD:
-        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-    else:
-        logger.warning("MQTT_USERNAME and/or MQTT_PASSWORD not set")
-    try:
-        client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        client.loop_start()
-        logger.info(f"Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
-    except Exception as e:
-        logger.critical(f"Failed to connect to MQTT broker: {e}")
-        sys.exit(1)
-    return client
+def fan_on():
+    return GPIO.input(FAN_GPIO) == GPIO.HIGH
 
 # ============================== #
 # Temperature Reading
@@ -72,29 +63,61 @@ def get_cpu_temperature():
         return None
 
 # ============================== #
-# MQTT Publishing
+# MQTT Lifecycle Manager Thread
 # ============================== #
-def publish_state(mqtt_client, cpu_temp, fan_on):
+mqtt_client = None
+mqtt_connected_event = threading.Event()
+
+def mqtt_manager_thread():
+    global mqtt_client
+
+    while not mqtt_connected_event.is_set():
+        try:
+            logger.info("Attempting MQTT connection...")
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+
+            if MQTT_USERNAME and MQTT_PASSWORD:
+                client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+            else:
+                logger.warning("MQTT_USERNAME and/or MQTT_PASSWORD not set")
+
+            client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            client.loop_start()
+
+            mqtt_client = client
+            mqtt_connected_event.set()
+            logger.info(f"Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
+
+        except Exception as e:
+            logger.warning(f"MQTT connect failed, retrying in {MQTT_RETRY_SECS}s: {e}")
+            time.sleep(MQTT_RETRY_SECS)
+
+# ============================== #
+# MQTT Publishing (non-fatal)
+# ============================== #
+def publish_state(cpu_temp, fan_on):
+    if not mqtt_client:
+        return False
+
     payload = {
         "temp": cpu_temp,
         "fan": 1 if fan_on else 0
-        }
-    
+    }
+
     try:
-        mqtt_client.publish(TOPIC_CPU, json.dumps(payload), qos=1)
-        logger.info(f"Published cpu temp and fan state to MQTT: {cpu_temp} fan_on={fan_on}")
+        result = mqtt_client.publish(TOPIC_CPU, json.dumps(payload), qos=1)
+        return result.rc == mqtt.MQTT_ERR_SUCCESS
+            
     except Exception as e:
-        logger.warning(f"MQTT publish failed cpu temp and fan state: {e}")
+        logger.warning(f"MQTT publish threw exception: {e}")
+        return False
 
 # ============================== #
 # Main Loop
 # ============================== #
 def main():
     setup_gpio()
-    mqtt_client = setup_mqtt()
-    mqtt_client.loop_start()  # Start MQTT loop for background handling
-
-    fan_on = False
+    threading.Thread(target=mqtt_manager_thread, daemon=True).start()
 
     try:
         while True:
@@ -103,19 +126,14 @@ def main():
                 if cpu_temp is None:
                     logger.warning("Could not read CPU temperature")
                 else:
-                    logger.info(f"CPU Temp: {cpu_temp:.1f}°C")
-
-                    if not fan_on and cpu_temp >= FAN_ON_TEMP:
+                    if not fan_on() and cpu_temp >= FAN_ON_TEMP:
                         GPIO.output(FAN_GPIO, GPIO.HIGH)
-                        fan_on = True
-                        logger.info("Fan turned ON")
 
-                    elif fan_on and cpu_temp <= FAN_OFF_TEMP:
+                    elif fan_on() and cpu_temp <= FAN_OFF_TEMP:
                         GPIO.output(FAN_GPIO, GPIO.LOW)
-                        fan_on = False
-                        logger.info("Fan turned OFF")
 
-                    publish_state(mqtt_client, cpu_temp, fan_on)
+                    is_published = publish_state(cpu_temp, fan_on())
+                    logger.info(f"CPU Temp: {cpu_temp:.1f}°C fan:{'ON' if fan_on() else 'OFF'} mqtt:{'PUBLISHED' if is_published else 'NOT_PUBLISHED'}")
 
             except Exception as e:
                 logger.warning(f"Fan control loop error: {e}")
@@ -135,8 +153,11 @@ def main():
             pass  # GPIO might not be initialized
 
         GPIO.cleanup()
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
+
+        if mqtt_client:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+
         logger.info("Fan OFF, MQTT disconnected, GPIO cleaned up")
 
 # ============================== #
