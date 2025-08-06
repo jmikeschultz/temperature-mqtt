@@ -13,8 +13,8 @@ import RPi.GPIO as GPIO
 # Configuration Section
 # ============================== #
 FAN_GPIO = 12  # BCM pin number (GPIO12)
-FAN_ON_TEMP = 50.0  # Temp (C) to turn fan ON
-FAN_OFF_TEMP = 45.0  # Temp (C) to turn fan OFF
+FAN_ON_TEMP = 65.0  # Temp (C) to turn fan ON
+FAN_OFF_TEMP = 55.0  # Temp (C) to turn fan OFF
 SLEEP_SECS = 5  # Time between temp checks
 MQTT_RETRY_SECS = 30  # Time between MQTT reconnection attempts
 
